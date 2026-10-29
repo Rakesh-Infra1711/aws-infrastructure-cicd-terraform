@@ -1,0 +1,62 @@
+#!/bin/bash
+# Bootstraps an application instance (Amazon Linux 2023).
+# Rendered by Terraform templatefile(); app version: ${app_version}
+set -euo pipefail
+exec > >(tee /var/log/app-bootstrap.log) 2>&1
+
+APP_DIR=/opt/app
+
+dnf install -y python3 python3-pip
+
+# Dedicated non-root service user
+id app >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /sbin/nologin app
+mkdir -p "$APP_DIR"
+
+# Application code from the private S3 bucket (via the S3 VPC endpoint)
+aws s3 cp "s3://${app_bucket}/app/" "$APP_DIR/" --recursive --region "${region}"
+
+# RDS CA bundle so the app can verify the database TLS certificate
+curl -fsSL -o "$APP_DIR/rds-ca.pem" "https://truststore.pki.rds.amazonaws.com/${region}/${region}-bundle.pem"
+
+python3 -m venv "$APP_DIR/venv"
+"$APP_DIR/venv/bin/pip" install --quiet --upgrade pip
+"$APP_DIR/venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+chown -R app:app "$APP_DIR"
+
+# Non-secret configuration only. The DB password is fetched at runtime from
+# Secrets Manager using the instance role - it is never written to disk.
+cat > /etc/app.env <<EOF
+AWS_REGION=${region}
+DB_HOST=${db_host}
+DB_NAME=${db_name}
+DB_SECRET_ARN=${db_secret_arn}
+DB_CA_PATH=$APP_DIR/rds-ca.pem
+APP_VERSION=${app_version}
+EOF
+chmod 640 /etc/app.env
+chown root:app /etc/app.env
+
+cat > /etc/systemd/system/app.service <<EOF
+[Unit]
+Description=Demo web application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=app
+Group=app
+WorkingDirectory=$APP_DIR
+EnvironmentFile=/etc/app.env
+ExecStart=$APP_DIR/venv/bin/gunicorn --workers 2 --bind 0.0.0.0:${app_port} --access-logfile - app:app
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now app.service

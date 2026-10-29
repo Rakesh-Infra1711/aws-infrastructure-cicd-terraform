@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars for local runs (terraform.tfvars is git-ignored).
+# In GitHub Actions these values come from repository variables instead.
+
+aws_region   = "ap-south-1"
+project_name = "devops-task"
+environment  = "prod"
+
+domain_name = "devops-task.yourdomain.com"
+
+# Leave empty if your DNS is at GoDaddy or another provider
+route53_zone_id = ""
+
+# Cost-saving defaults for the assessment. For production:
+#   single_nat_gateway = false, db_multi_az = true, db_deletion_protection = true
+single_nat_gateway     = true
+db_multi_az            = false
+db_deletion_protection = false

@@ -1,0 +1,195 @@
+name: Terraform CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**", "app/**", ".github/workflows/terraform.yml"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", "app/**", ".github/workflows/terraform.yml"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+# Only one Terraform run at a time (S3 lockfile also protects the state)
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC token for AWS - no stored access keys
+  contents: read
+
+env:
+  TF_VERSION: "1.17.1"
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_aws_region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+  TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+  BACKEND_CONFIG: >-
+    -backend-config=bucket=${{ vars.TF_STATE_BUCKET }}
+    -backend-config=key=prod/terraform.tfstate
+    -backend-config=region=${{ vars.AWS_REGION || 'ap-south-1' }}
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  app-tests:
+    name: App unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q tests
+
+  plan:
+    name: Terraform plan
+    needs: app-tests
+    if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Init
+        run: terraform init -input=false $BACKEND_CONFIG
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Security policy tests (mocked AWS, no resources created)
+        run: terraform test
+
+      - name: Plan
+        run: |
+          terraform plan -input=false -out=tfplan
+          {
+            echo '## Terraform plan'
+            echo '```'
+            terraform show -no-color tfplan | tail -n 60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            terraform/tfplan
+            terraform/.terraform.lock.hcl
+          retention-days: 5
+
+  apply:
+    name: Terraform apply + health check
+    needs: plan
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers here for a manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Init
+        run: terraform init -input=false $BACKEND_CONFIG
+
+      - name: Apply the reviewed plan
+        run: terraform apply -input=false tfplan
+
+      - name: Wait for ASG instance refresh
+        run: |
+          ASG=$(terraform output -raw asg_name)
+          for i in $(seq 1 60); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG" --max-records 1 \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            echo "Instance refresh: ${STATUS}"
+            case "$STATUS" in
+              Successful|None) exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed) exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "Timed out waiting for instance refresh"; exit 1
+
+      - name: End-to-end health check
+        run: |
+          URL=$(terraform output -raw app_url)
+          for i in $(seq 1 30); do
+            if curl -fsS "$URL/health" && curl -fsS "$URL/db"; then
+              echo; echo "Application healthy at $URL"
+              {
+                echo "## Deployment successful"
+                echo "- URL: $URL"
+                echo "- App version: $(terraform output -raw app_version)"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Not healthy yet (attempt $i/30)"; sleep 20
+          done
+          echo "Health check failed"; exit 1
+
+  destroy:
+    name: Terraform destroy
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -input=false $BACKEND_CONFIG
+
+      - name: Destroy
+        run: terraform destroy -input=false -auto-approve
