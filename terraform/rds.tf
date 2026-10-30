@@ -28,7 +28,7 @@ resource "aws_db_instance" "this" {
   manage_master_user_password = true
 
   allocated_storage     = 20
-  max_allocated_storage = 50
+  max_allocated_storage = var.db_max_allocated_storage > 0 ? var.db_max_allocated_storage : null
   storage_type          = "gp3"
   storage_encrypted     = true # encryption at rest (AWS-managed KMS key)
 
@@ -38,7 +38,7 @@ resource "aws_db_instance" "this" {
   publicly_accessible    = false
   multi_az               = var.db_multi_az
 
-  backup_retention_period         = 7
+  backup_retention_period         = var.db_backup_retention_days
   backup_window                   = "19:00-20:00" # UTC = 00:30-01:30 IST
   maintenance_window              = "sun:20:30-sun:21:30"
   copy_tags_to_snapshot           = true

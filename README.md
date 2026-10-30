@@ -70,6 +70,8 @@ In **Settings → Secrets and variables → Actions**:
 | Variable | `AWS_REGION` | `ap-south-1` |
 | Variable | `DOMAIN_NAME` | e.g. `devops-task.yourdomain.com` |
 | Variable | `ROUTE53_ZONE_ID` | Hosted zone ID, or leave unset for GoDaddy or other DNS |
+| Variable | `DB_BACKUP_RETENTION_DAYS` | `1` on an AWS **Free plan** account (default `7`) |
+| Variable | `DB_MAX_ALLOCATED_STORAGE` | `0` on an AWS **Free plan** account (default `50`) |
 
 In **Settings → Environments**, create an environment called `production`. Optionally add yourself as a required reviewer to get a manual approval gate before `apply`.
 
@@ -167,6 +169,7 @@ The bootstrap state bucket has `prevent_destroy`. Delete it manually afterwards 
 |---|---|
 | Apply waits on `aws_acm_certificate_validation` | The validation CNAME isn't in DNS yet. Run `terraform output acm_validation_records` |
 | Targets unhealthy | SSM into an instance: `sudo cat /var/log/app-bootstrap.log`, `sudo journalctl -u app` |
+| `FreeTierRestrictionError` creating RDS | AWS Free plan account: set `db_backup_retention_days = 1` and `db_max_allocated_storage = 0` (and the matching GitHub variables) |
 | `/db` returns 503 | Instance role can read the secret? DB SG allows the app SG? Check `journalctl -u app` |
 | No ALB logs | Logs are delivered every 5 minutes under `alb/AWSLogs/<account-id>/` |
 | Pipeline `AccessDenied` on assume role | `AWS_ROLE_ARN` secret, `production` environment name, and the `github_repo` value used in bootstrap |

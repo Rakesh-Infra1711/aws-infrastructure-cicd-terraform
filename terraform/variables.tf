@@ -103,6 +103,23 @@ variable "db_multi_az" {
   default     = false
 }
 
+variable "db_backup_retention_days" {
+  description = "Days of automated RDS backups (point-in-time recovery). AWS Free plan accounts allow only 1."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.db_backup_retention_days >= 0 && var.db_backup_retention_days <= 35
+    error_message = "Backup retention must be between 0 and 35 days."
+  }
+}
+
+variable "db_max_allocated_storage" {
+  description = "Upper limit in GiB for RDS storage autoscaling. 0 disables autoscaling (needed on the AWS Free plan)."
+  type        = number
+  default     = 50
+}
+
 variable "db_deletion_protection" {
   description = "Protect the database from accidental deletion"
   type        = bool

@@ -178,3 +178,17 @@ run "production_mode" {
     error_message = "Production mode should enable Multi-AZ and deletion protection"
   }
 }
+
+run "free_plan_settings" {
+  command = apply
+
+  variables {
+    db_backup_retention_days = 1
+    db_max_allocated_storage = 0
+  }
+
+  assert {
+    condition     = aws_db_instance.this.backup_retention_period == 1
+    error_message = "Free plan settings should set 1 day of backups"
+  }
+}

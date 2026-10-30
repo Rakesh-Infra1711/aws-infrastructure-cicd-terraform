@@ -13,5 +13,10 @@ route53_zone_id = ""
 # Cost-saving defaults for the assessment. For production:
 #   single_nat_gateway = false, db_multi_az = true, db_deletion_protection = true
 single_nat_gateway     = true
+
+# AWS Free plan accounts: RDS allows only 1 day of backups and no storage
+# autoscaling. Paid accounts can remove these two lines (defaults: 7 and 50).
+db_backup_retention_days = 1
+db_max_allocated_storage = 0
 db_multi_az            = false
 db_deletion_protection = false
