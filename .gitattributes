@@ -1,0 +1,7 @@
+# Keep LF line endings on every platform. Terraform hashes app files and renders
+# user_data from templates; CRLF checkouts on Windows would change those hashes
+# and produce spurious diffs between local and CI applies.
+* text=auto eol=lf
+
+*.png binary
+*.svg text eol=lf
