@@ -140,7 +140,7 @@ def index():
  td{{border:1px solid #ccd;padding:8px}} td:first-child{{font-weight:600;width:35%}}
  .ok{{color:#137333;font-weight:600}} .err{{color:#b3261e;font-weight:600}}
 </style></head><body>
-<h1>AWS Infrastructure &amp; CI/CD &mdash; Demo App</h1>
+<h1>AWS Infrastructure &amp; CI/CD &mdash; Demo App v2</h1>
 <p>Served over HTTPS by an Application Load Balancer to an EC2 Auto Scaling Group.
 Refresh the page to see requests balanced across instances and Availability Zones.</p>
 <table>
