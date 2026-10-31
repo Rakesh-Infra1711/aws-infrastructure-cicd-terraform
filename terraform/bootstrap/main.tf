@@ -40,6 +40,11 @@ variable "project_name" {
 variable "github_repo" {
   description = "GitHub repository allowed to assume the deploy role, in owner/repo format"
   type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_repo))
+    error_message = "Use the owner/repo format, e.g. Rakesh-Infra1711/aws-infrastructure-cicd-terraform."
+  }
 }
 
 data "aws_caller_identity" "current" {}
@@ -47,6 +52,20 @@ data "aws_caller_identity" "current" {}
 locals {
   account_id   = data.aws_caller_identity.current.account_id
   state_bucket = "${var.project_name}-tfstate-${local.account_id}"
+
+  # GitHub OIDC subject claims come in two formats:
+  #   classic:  repo:OWNER/REPO:<context>
+  #   with IDs: repo:OWNER@<owner-id>/REPO@<repo-id>:<context>
+  # Accept both, for this repository and these contexts only.
+  github_owner    = split("/", var.github_repo)[0]
+  github_repo     = split("/", var.github_repo)[1]
+  github_contexts = ["pull_request", "ref:refs/heads/main", "environment:production"]
+  github_subjects = flatten([
+    for c in local.github_contexts : [
+      "repo:${local.github_owner}/${local.github_repo}:${c}",
+      "repo:${local.github_owner}@*/${local.github_repo}@*:${c}",
+    ]
+  ])
 }
 
 # ---------------------------------------------------------------------------
@@ -126,11 +145,7 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.github_repo}:pull_request",
-        "repo:${var.github_repo}:ref:refs/heads/main",
-        "repo:${var.github_repo}:environment:production",
-      ]
+      values   = local.github_subjects
     }
   }
 }
