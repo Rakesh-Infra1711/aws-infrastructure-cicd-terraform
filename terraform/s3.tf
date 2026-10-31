@@ -80,7 +80,9 @@ resource "aws_s3_object" "app_code" {
   bucket = aws_s3_bucket.app.id
   key    = "app/${each.value}"
   source = "${path.module}/../app/${each.value}"
-  etag   = filemd5("${path.module}/../app/${each.value}")
+  # source_hash, not etag: with SSE-KMS the ETag S3 returns is not the file's
+  # MD5, so an etag comparison would show a change on every plan.
+  source_hash = filemd5("${path.module}/../app/${each.value}")
 
   depends_on = [aws_s3_bucket_server_side_encryption_configuration.app]
 }
