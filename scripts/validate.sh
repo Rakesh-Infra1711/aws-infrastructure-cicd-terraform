@@ -5,10 +5,12 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../terraform"
 
-URL=$(terraform output -raw app_url)
-ALB=$(terraform output -raw alb_dns_name)
-TG=$(terraform output -raw target_group_arn)
-ASG=$(terraform output -raw asg_name)
+# tr -d '\r' keeps this working in Git Bash on Windows, where tools emit CRLF
+out() { terraform output -raw "$1" | tr -d '\r'; }
+URL=$(out app_url)
+ALB=$(out alb_dns_name)
+TG=$(out target_group_arn)
+ASG=$(out asg_name)
 HOST=${URL#https://}
 PASS=0
 FAIL=0
@@ -35,11 +37,11 @@ check "TLS 1.1 is rejected" \
   bash -c "! echo | openssl s_client -connect $HOST:443 -servername $HOST -tls1_1 >/dev/null 2>&1"
 
 HEALTHY=$(aws elbv2 describe-target-health --target-group-arn "$TG" \
-  --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])" --output text)
+  --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])" --output text | tr -d '\r')
 check "At least 2 healthy targets in the target group (found: $HEALTHY)" test "$HEALTHY" -ge 2
 
 AZS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
-  --query "AutoScalingGroups[0].Instances[].AvailabilityZone" --output text | tr '\t' '\n' | sort -u | wc -l)
+  --query "AutoScalingGroups[0].Instances[].AvailabilityZone" --output text | tr -d '\r' | tr '\t' '\n' | sort -u | wc -l | tr -d ' ')
 check "Instances spread across multiple AZs (found: $AZS)" test "$AZS" -ge 2
 
 echo
