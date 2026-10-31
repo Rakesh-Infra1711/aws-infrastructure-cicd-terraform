@@ -17,7 +17,7 @@ Highly available web application on AWS, provisioned entirely with Terraform and
 | Screenshots | [`docs/screenshots/`](docs/screenshots) |
 | End-to-end validation script | [`scripts/validate.sh`](scripts/validate.sh) |
 
-**Working URL:** `https://<your-domain>`. Fill in after deployment.
+**Working URL:** https://devops-task.deepaisetu.online
 
 ---
 
