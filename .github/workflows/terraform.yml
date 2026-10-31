@@ -104,6 +104,8 @@ jobs:
           path: |
             terraform/tfplan
             terraform/.terraform.lock.hcl
+          include-hidden-files: true # .terraform.lock.hcl starts with a dot
+          if-no-files-found: error
           retention-days: 5
 
   apply:
