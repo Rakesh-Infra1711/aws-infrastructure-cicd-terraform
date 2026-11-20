@@ -6,11 +6,17 @@ Endpoints
   /        - HTML page: instance, AZ, app version and a visit counter stored in RDS
 
 Database credentials are read at runtime from AWS Secrets Manager using the
-EC2 instance role. Nothing secret is stored in code, environment or disk.
+instance or task role. Nothing secret is stored in code or on disk.
+
+The same code runs three ways:
+  - on EC2 (Auto Scaling Group)  - host details from instance metadata (IMDSv2)
+  - on ECS Fargate               - task details from the ECS task metadata endpoint
+  - locally in Docker Compose    - credentials from DB_USER / DB_PASSWORD (local only)
 """
 
 import json
 import os
+import socket
 import threading
 import time
 import urllib.request
@@ -38,7 +44,10 @@ def get_db_credentials():
     """Return {'username', 'password'} from Secrets Manager, cached for 5 minutes.
 
     The cache is short so a rotated password is picked up automatically.
+    Without DB_SECRET_ARN (local Docker Compose only), DB_USER / DB_PASSWORD are used.
     """
+    if not DB_SECRET_ARN:
+        return {"username": os.environ.get("DB_USER", ""), "password": os.environ.get("DB_PASSWORD", "")}
     with _secret_lock:
         fresh = time.time() - _secret_cache["fetched_at"] < _SECRET_TTL_SECONDS
         if _secret_cache["value"] and fresh:
@@ -75,7 +84,7 @@ def record_visit():
                 " instance_id VARCHAR(64) NOT NULL,"
                 " visited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
             )
-            cur.execute("INSERT INTO visits (instance_id) VALUES (%s)", (instance_metadata("instance-id"),))
+            cur.execute("INSERT INTO visits (instance_id) VALUES (%s)", (runtime_info()["host"][:64],))
             cur.execute("SELECT COUNT(*) FROM visits")
             total = cur.fetchone()[0]
             cur.execute("SELECT VERSION()")
@@ -103,6 +112,39 @@ def instance_metadata(path):
         return "unknown"
 
 
+_runtime_cache = {}
+
+
+def runtime_info():
+    """Return {'host', 'az', 'platform'} for the page. Looked up once, then cached."""
+    if _runtime_cache:
+        return _runtime_cache
+    ecs_uri = os.environ.get("ECS_CONTAINER_METADATA_URI_V4")
+    info = None
+    if ecs_uri:
+        try:
+            task = json.loads(urllib.request.urlopen(f"{ecs_uri}/task", timeout=1).read().decode())
+            info = {
+                "host": task.get("TaskARN", "unknown").split("/")[-1],
+                "az": task.get("AvailabilityZone", "unknown"),
+                "platform": "Docker container on Amazon ECS Fargate",
+            }
+        except Exception:
+            info = None
+    if info is None and os.environ.get("DISABLE_IMDS") != "1":
+        instance_id = instance_metadata("instance-id")
+        if instance_id != "unknown":
+            info = {
+                "host": instance_id,
+                "az": instance_metadata("placement/availability-zone"),
+                "platform": "Amazon EC2 Auto Scaling Group behind an Application Load Balancer",
+            }
+    if info is None:
+        info = {"host": socket.gethostname(), "az": "local", "platform": "Docker container (local)"}
+    _runtime_cache.update(info)
+    return _runtime_cache
+
+
 @app.route("/health")
 def health():
     return jsonify(status="ok", version=APP_VERSION), 200
@@ -120,11 +162,11 @@ def db_check():
 
 @app.route("/")
 def index():
-    instance_id = instance_metadata("instance-id")
-    az = instance_metadata("placement/availability-zone")
+    info = runtime_info()
     try:
         total, version = record_visit()
-        db_status = f"Connected to MySQL {escape(version)} over TLS &mdash; total visits: {total}"
+        tls = " over TLS" if DB_CA_PATH else ""
+        db_status = f"Connected to MySQL {escape(version)}{tls} &mdash; total visits: {total}"
         db_class = "ok"
     except Exception as exc:
         app.logger.error("Database check failed: %s", exc)
@@ -141,11 +183,10 @@ def index():
  .ok{{color:#137333;font-weight:600}} .err{{color:#b3261e;font-weight:600}}
 </style></head><body>
 <h1>AWS Infrastructure &amp; CI/CD &mdash; Demo App v2</h1>
-<p>Served over HTTPS by an Application Load Balancer to an EC2 Auto Scaling Group.
-Refresh the page to see requests balanced across instances and Availability Zones.</p>
+<p>Running on: <b>{escape(info["platform"])}</b></p>
 <table>
- <tr><td>Instance ID</td><td>{escape(instance_id)}</td></tr>
- <tr><td>Availability Zone</td><td>{escape(az)}</td></tr>
+ <tr><td>Instance / task ID</td><td>{escape(info["host"])}</td></tr>
+ <tr><td>Availability Zone</td><td>{escape(info["az"])}</td></tr>
  <tr><td>App version</td><td>{escape(APP_VERSION)}</td></tr>
  <tr><td>Database</td><td class="{db_class}">{db_status}</td></tr>
 </table>

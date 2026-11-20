@@ -1,0 +1,11 @@
+# Keep the build context small and keep secrets out of the image
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.venv
+venv
+.env
+*.log
+.git
+Dockerfile
+.dockerignore

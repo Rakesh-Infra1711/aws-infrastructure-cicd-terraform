@@ -3,10 +3,10 @@ name: Terraform CI/CD
 on:
   pull_request:
     branches: [main]
-    paths: ["terraform/**", "app/**", ".github/workflows/terraform.yml"]
+    paths: ["terraform/**", "app/*.py", "app/requirements.txt", "app/tests/**", ".github/workflows/terraform.yml"]
   push:
     branches: [main]
-    paths: ["terraform/**", "app/**", ".github/workflows/terraform.yml"]
+    paths: ["terraform/**", "app/*.py", "app/requirements.txt", "app/tests/**", ".github/workflows/terraform.yml"]
   workflow_dispatch:
     inputs:
       action:

@@ -22,3 +22,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# ECS stack (provider lock is created per platform at init)
+ecs/.terraform.lock.hcl

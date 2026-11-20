@@ -1,0 +1,8 @@
+aws_region = "ap-south-1"
+
+# Set false if the GitHub OIDC provider already exists in this account
+# (for example, created by ../terraform/bootstrap)
+create_github_oidc_provider = true
+
+# Restrict the demo to your own IP, e.g. "203.0.113.10/32"
+allowed_cidr = "0.0.0.0/0"

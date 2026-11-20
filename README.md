@@ -16,6 +16,7 @@ Highly available web application on AWS, provisioned entirely with Terraform and
 | Design decisions | [`docs/DESIGN.md`](docs/DESIGN.md) |
 | Screenshots | [`docs/screenshots/`](docs/screenshots) |
 | End-to-end validation script | [`scripts/validate.sh`](scripts/validate.sh) |
+| **Containers: Docker, ECR, ECS Fargate** | [`docs/CONTAINERS.md`](docs/CONTAINERS.md) |
 
 **Working URL:** https://devops-task.deepaisetu.online
 
@@ -177,3 +178,13 @@ The bootstrap state bucket has `prevent_destroy`. Delete it manually afterwards 
 ## 8. Possible next steps
 
 AWS WAF on the ALB · CloudWatch alarms with SNS notifications · RDS Proxy · VPC flow logs · container-based deployment (ECS/EKS) · separate dev/stage/prod workspaces.
+
+## 9. Containers: Docker, ECR and ECS Fargate
+
+The app is also containerised and deployed to **ECS Fargate** by a second pipeline
+([`.github/workflows/docker.yml`](.github/workflows/docker.yml)):
+multi-stage Dockerfile with a non-root user and health check, unit tests inside the
+image build, hadolint, Trivy scanning, push to ECR with immutable commit-SHA tags, and
+a rolling ECS deployment with automatic rollback and a live health check.
+Run it locally with `docker compose up --build`.
+Full guide: [`docs/CONTAINERS.md`](docs/CONTAINERS.md).

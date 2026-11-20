@@ -1,0 +1,40 @@
+# Local development: the app container plus a MySQL container.
+#   docker compose up --build
+#   open http://localhost:8080
+# The password below is for local use only; on AWS the app reads credentials
+# from Secrets Manager.
+services:
+  app:
+    build:
+      context: ./app
+      target: runtime
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: db
+      DB_NAME: appdb
+      DB_USER: app
+      DB_PASSWORD: local-dev-password
+      DISABLE_IMDS: "1"
+      APP_VERSION: local-compose
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: app
+      MYSQL_PASSWORD: local-dev-password
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uapp", "-plocal-dev-password"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - db-data:/var/lib/mysql
+
+volumes:
+  db-data:

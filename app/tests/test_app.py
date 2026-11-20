@@ -7,6 +7,15 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app as app_module  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def reset_runtime_cache():
+    """runtime_info() caches its result; clear it so tests don't affect each other."""
+    app_module._runtime_cache.clear()
+    yield
+    app_module._runtime_cache.clear()
 
 
 def client():
@@ -43,3 +52,23 @@ def test_index_renders_even_if_database_down():
     assert resp.status_code == 200
     assert b"Database unavailable" in resp.data
     assert b"i-test" in resp.data
+
+
+def test_index_on_ecs_uses_task_metadata(monkeypatch):
+    monkeypatch.setenv("ECS_CONTAINER_METADATA_URI_V4", "http://169.254.170.2/v4/abc")
+    task = b'{"TaskARN": "arn:aws:ecs:ap-south-1:1:task/cluster/task123", "AvailabilityZone": "ap-south-1b"}'
+    fake = mock.MagicMock()
+    fake.read.return_value = task
+    with mock.patch.object(app_module.urllib.request, "urlopen", return_value=fake), \
+         mock.patch.object(app_module, "record_visit", return_value=(1, "8.4.0")):
+        resp = client().get("/")
+    assert b"task123" in resp.data
+    assert b"ap-south-1b" in resp.data
+    assert b"ECS Fargate" in resp.data
+
+
+def test_local_credentials_used_without_secret_arn(monkeypatch):
+    monkeypatch.setattr(app_module, "DB_SECRET_ARN", "")
+    monkeypatch.setenv("DB_USER", "app")
+    monkeypatch.setenv("DB_PASSWORD", "local-only")
+    assert app_module.get_db_credentials() == {"username": "app", "password": "local-only"}

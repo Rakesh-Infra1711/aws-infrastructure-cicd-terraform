@@ -1,0 +1,209 @@
+name: Docker CI/CD (ECR + ECS Fargate)
+
+# Pull request: lint the Dockerfile, run unit tests inside the build, build the
+#               image, smoke-test the container and scan it for vulnerabilities.
+# Merge to main: the same checks, then push the image to ECR (tagged with the
+#               commit SHA) and roll it out to ECS Fargate with a health check.
+on:
+  pull_request:
+    branches: [main]
+    paths: ["app/**", "ecs/**", ".github/workflows/docker.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", "ecs/**", ".github/workflows/docker.yml"]
+  workflow_dispatch:
+    inputs:
+      desired_count:
+        description: "Number of running tasks (0 stops the app to save cost)"
+        type: choice
+        options: ["1", "2", "0"]
+        default: "1"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  LOCAL_IMAGE: devops-app:ci
+  TRIVY_IMAGE: aquasec/trivy:0.57.0
+
+jobs:
+  build-test-scan:
+    name: Build, test and scan image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+          ignore: DL3008,DL3013 # unpinned apt/pip versions are pinned in requirements.txt instead
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Run unit tests inside the image build (test stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          target: test
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          target: runtime
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+
+      - name: Smoke test the container
+        run: |
+          docker run -d --name smoke -p 8080:8080 -e DISABLE_IMDS=1 "$LOCAL_IMAGE"
+          for _ in $(seq 1 20); do
+            if curl -fsS http://localhost:8080/health; then echo; break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/health | grep -q '"status":"ok"'
+          test "$(docker exec smoke id -u)" != "0" || { echo "Container must not run as root"; exit 1; }
+          docker images "$LOCAL_IMAGE" --format 'Image size: {{.Size}}' | tee -a "$GITHUB_STEP_SUMMARY"
+          docker rm -f smoke
+
+      - name: Scan image for vulnerabilities (Trivy, fail on CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+            image --no-progress --ignore-unfixed --severity HIGH,CRITICAL --exit-code 0 "$LOCAL_IMAGE"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+            image --no-progress --ignore-unfixed --severity CRITICAL --exit-code 1 "$LOCAL_IMAGE"
+
+  ecs-terraform:
+    name: ECS Terraform checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.1"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+      - name: Offline security tests (mocked AWS)
+        run: terraform test
+
+  deploy:
+    name: Push to ECR and deploy to ECS
+    needs: [build-test-scan, ecs-terraform]
+    # Runs after merge (or manually) once the ECS stack exists and its outputs are saved as variables
+    if: github.event_name != 'pull_request' && vars.ECS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers here for a manual approval gate
+    permissions:
+      contents: read
+      id-token: write # OIDC: short-lived AWS credentials, no stored keys
+    env:
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+      ECS_TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+      DESIRED_COUNT: ${{ inputs.desired_count || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Scale to zero (stop the app)
+        if: env.DESIRED_COUNT == '0'
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --desired-count 0 >/dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          echo "Service scaled to 0 tasks." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to Amazon ECR
+        if: env.DESIRED_COUNT != '0'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+        if: env.DESIRED_COUNT != '0'
+
+      - name: Build and push image (tag = commit SHA)
+        if: env.DESIRED_COUNT != '0'
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          target: runtime
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          provenance: false
+
+      - name: Register new task definition and update the service
+        if: env.DESIRED_COUNT != '0'
+        id: deploy
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$ECS_TASK_FAMILY" \
+            --query taskDefinition --output json > current-td.json
+          jq --arg IMG "$IMAGE" '.containerDefinitions[0].image = $IMG
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy)' current-td.json > new-td.json
+          NEW_TD=$(aws ecs register-task-definition --cli-input-json file://new-td.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "New task definition: $NEW_TD"
+          echo "task_definition=$NEW_TD" >> "$GITHUB_OUTPUT"
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TD" --desired-count "$DESIRED_COUNT" >/dev/null
+
+      - name: Wait for the rollout and confirm it was not rolled back
+        if: env.DESIRED_COUNT != '0'
+        env:
+          NEW_TD: ${{ steps.deploy.outputs.task_definition }}
+        run: |
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          # The circuit breaker may have rolled back to the old version; check which one is live
+          LIVE_TD=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].deployments[?status=='PRIMARY'].taskDefinition | [0]" --output text)
+          if [ "$LIVE_TD" != "$NEW_TD" ]; then
+            echo "Deployment failed and was rolled back to $LIVE_TD"; exit 1
+          fi
+
+      - name: Smoke test the live task
+        if: env.DESIRED_COUNT != '0'
+        env:
+          NEW_TD: ${{ steps.deploy.outputs.task_definition }}
+        run: |
+          read -r -a TASKS <<< "$(aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+            --desired-status RUNNING --query taskArns --output text)"
+          ENI=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "${TASKS[@]}" \
+            --query "tasks[?taskDefinitionArn=='$NEW_TD'] | [0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+            --output text)
+          IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" \
+            --query "NetworkInterfaces[0].Association.PublicIp" --output text)
+          for _ in $(seq 1 10); do
+            BODY=$(curl -fsS "http://$IP:8080/health" || true)
+            echo "$BODY" | grep -q "\"version\":\"$GITHUB_SHA\"" && break
+            sleep 6
+          done
+          echo "$BODY" | grep -q "\"version\":\"$GITHUB_SHA\"" || { echo "Health check failed: $BODY"; exit 1; }
+          {
+            echo "### Deployed ${GITHUB_SHA::7} to ECS Fargate"
+            echo "- App: http://$IP:8080 (public IP of the running task; it changes on each deployment)"
+            echo "- Task definition: \`$NEW_TD\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
